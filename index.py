@@ -1,10 +1,11 @@
-mport psycopg2
+#!/usr/bin/env python3
+import psycopg2
 import base64
 import json
 import requests
 import time
 
-svcTemplate = {
+serviceTemplate = {
     "apiVersion": "v1",
     "kind": "Service",
     "metadata": {
@@ -18,7 +19,7 @@ svcTemplate = {
     }
 }
 
-epTemplate = {
+endpointTemplate = {
     "apiVersion": "v1",
     "kind": "Endpoints",
     "metadata": {
@@ -31,6 +32,7 @@ epTemplate = {
 }
 
 class kubeData(object):
+    """Kubernetes parameters and methods for api"""
     def __init__(self, url):
         self.headers = {'Content-Type': 'application/json'}
         self.url = url
@@ -53,21 +55,22 @@ class kubeData(object):
         return data
 
 class pgc(object):
-    """docstring"""
+    """Work with CRD pgclusters"""
     def __init__(self, data, namespace):
         self.name = data['metadata']['name']
         self.namespace = namespace
         self.pg_secret = data['spec']['secret']
         self.pg_hosts = data['spec']['hosts']
-        svc = svcTemplate
-        ep = epTemplate
+        svc = serviceTemplate
+        ep = endpointTemplate
         svc['metadata']['labels']['app'] = self.name
         svc['metadata']['name'] = self.name
         ep['metadata']['labels']['app'] = self.name
         ep['metadata']['name'] = self.name
-        self.svcTemplate = svc
-        self.epTemplate = ep
+        self.serviceTemplate = svc
+        self.endpointTemplate = ep
     def get_secret(self):
+        #Get secret for postgres user with needed privileges
         getSecret = kubeData('/api/v1/namespaces/' + self.namespace + '/secrets/' + self.pg_secret)
         pg_secret = getSecret.get()['data']
         self.pg_pass = base64.b64decode(pg_secret['password']).decode("utf-8")
@@ -75,6 +78,7 @@ class pgc(object):
         self.pg_db = base64.b64decode(pg_secret['database']).decode("utf-8")
         return True
     def get_master(self):
+        #Get info about Master-node in postgres-cluster
         print (self.pg_hosts)
         for pg_host in self.pg_hosts:
             pg_address_array = pg_host.split(':')
@@ -100,6 +104,7 @@ class pgc(object):
             conn.close()
         return True
     def create_service(self):
+        #Create service-resource for external postgres
         svcNames = []
         svcKube = kubeData('/api/v1/namespaces/' + self.namespace + '/services')
         getSVC = svcKube.get()['items']
@@ -108,30 +113,33 @@ class pgc(object):
 
         if self.name not in svcNames:
             headers = {'Content-Type': 'application/json'}
-            self.svcTemplate['spec']['ports'].clear()
-            self.svcTemplate['spec']['ports'].append({ "port": int(self.master_port), "protocol": "TCP", "targetPort": int(self.master_port) })
-            self.epTemplate['subsets'].clear()
-            self.epTemplate['subsets'].append(self.ip_master)
+            self.serviceTemplate['spec']['ports'].clear()
+            self.serviceTemplate['spec']['ports'].append({ "port": int(self.master_port), "protocol": "TCP", "targetPort": int(self.master_port) })
+            self.endpointTemplate['subsets'].clear()
+            self.endpointTemplate['subsets'].append(self.ip_master)
 
-            svcKube.post(self.svcTemplate)
+            svcKube.post(self.serviceTemplate)
             epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints')
-            epKube.post(self.epTemplate)
+            epKube.post(self.endpointTemplate)
         return True
     def create_endpoint(self):
-        epTemplate['subsets'].clear()
-        epTemplate['subsets'].append(self.ip_master)
-        epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints/' + self.name)
-        epKube.put(self.epTemplate)
+        #Edit endpoints for service-resource
+        endpointTemplate['subsets'].clear()
+        endpointTemplate['subsets'].append(self.ip_master)
+        endpointsKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints/' + self.name)
+        endpointsKube.put(self.endpointTemplate)
         return True
 
 def main():
+    #Get list of namespaces
     nsKube = kubeData('/api/v1/namespaces/')
-    getNs = nsKube.get()
-    for ns in getNs['items']:
+    getNS = nsKube.get()
+    for ns in getNS['items']:
         namespace = ns['metadata']['name']
+        #Get CRD
         pgcKube = kubeData('/apis/stable.badsysadm.com/v1/namespaces/' + namespace + '/pgclusters')
-        getRes = pgcKube.get()
-        for res in getRes['items']:
+        getCRD = pgcKube.get()
+        for res in getCRD['items']:
             pgc_res = pgc(res, namespace)
             pgc_res.get_secret()
             pgc_res.get_master()
