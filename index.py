@@ -4,8 +4,9 @@ import base64
 import json
 import requests
 import time
+from redis.sentinel import Sentinel
 
-serviceTemplate = {
+svcTemplate = {
     "apiVersion": "v1",
     "kind": "Service",
     "metadata": {
@@ -19,7 +20,7 @@ serviceTemplate = {
     }
 }
 
-endpointTemplate = {
+epTemplate = {
     "apiVersion": "v1",
     "kind": "Endpoints",
     "metadata": {
@@ -32,7 +33,6 @@ endpointTemplate = {
 }
 
 class kubeData(object):
-    """Kubernetes parameters and methods for api"""
     def __init__(self, url):
         self.headers = {'Content-Type': 'application/json'}
         self.url = url
@@ -54,23 +54,86 @@ class kubeData(object):
         data = json.loads(putData.text)
         return data
 
+class rdc(object):
+    def __init__(self, data, namespace):
+        self.name = data['metadata']['name']
+        self.namespace = namespace
+        self.redis_auth = data['spec']['secret']
+        self.redis_hosts = data['spec']['hosts']
+        svc = svcTemplate
+        ep = epTemplate
+        svc['metadata']['labels']['app'] = self.name
+        svc['metadata']['name'] = self.name
+        ep['metadata']['labels']['app'] = self.name
+        ep['metadata']['name'] = self.name
+        self.svcTemplate = svc
+        self.epTemplate = ep
+    def get_secret(self):
+        getSecret = kubeData('/api/v1/namespaces/' + self.namespace + '/secrets/' + self.redis_auth)
+        redis_secret = getSecret.get()['data']
+        self.redis_password = base64.b64decode(redis_secret['auth']).decode("utf-8")
+        return True
+    def get_master(self):
+        print (self.redis_hosts)
+        sentinel_hosts = []
+        for redis_host in self.redis_hosts:
+            redis_address_array = redis_host.split(':')
+            redis_ip = redis_address_array[0]
+            redis_port = redis_address_array[1]
+            address = (redis_ip, redis_port)
+            sentinel_hosts.append( address )
+
+        print (sentinel_hosts)
+
+        sentinel = Sentinel([('192.168.206.41', 26379), ('192.168.206.42', 26379), ('192.168.206.43', 26379)], socket_timeout=0.1)
+        print(sentinel.discover_master('mymaster'))
+        master = sentinel.discover_master('mymaster')
+        self.master_ip = master[0]
+        self.master_port = master[1]
+        print(str(master[0]) + ' is master')
+        self.ip_master = {"addresses": [{"ip": self.master_ip}], "ports": [ { "port": int(self.master_port), "protocol": "TCP" } ] }
+        return True
+    def create_service(self):
+        svcNames = []
+        svcKube = kubeData('/api/v1/namespaces/' + self.namespace + '/services')
+        getSVC = svcKube.get()['items']
+        for svc in getSVC:
+            svcNames.append(svc['metadata']['name'])
+
+        if self.name not in svcNames:
+            headers = {'Content-Type': 'application/json'}
+            self.svcTemplate['spec']['ports'].clear()
+            self.svcTemplate['spec']['ports'].append({ "port": int(self.master_port), "protocol": "TCP", "targetPort": int(self.master_port) })
+            self.epTemplate['subsets'].clear()
+            self.epTemplate['subsets'].append(self.ip_master)
+
+            svcKube.post(self.svcTemplate)
+            epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints')
+            epKube.post(self.epTemplate)
+        return True
+    def create_endpoint(self):
+        epTemplate['subsets'].clear()
+        epTemplate['subsets'].append(self.ip_master)
+        epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints/' + self.name)
+        epKube.put(self.epTemplate)
+        return True
+
 class pgc(object):
-    """Work with CRD pgclusters"""
+    """docstring"""
     def __init__(self, data, namespace):
         self.name = data['metadata']['name']
         self.namespace = namespace
         self.pg_secret = data['spec']['secret']
         self.pg_hosts = data['spec']['hosts']
-        svc = serviceTemplate
-        ep = endpointTemplate
+        svc = svcTemplate
+        ep = epTemplate
         svc['metadata']['labels']['app'] = self.name
         svc['metadata']['name'] = self.name
         ep['metadata']['labels']['app'] = self.name
         ep['metadata']['name'] = self.name
-        self.serviceTemplate = svc
-        self.endpointTemplate = ep
+        self.svcTemplate = svc
+        self.epTemplate = ep
     def get_secret(self):
-        #Get secret for postgres user with needed privileges
         getSecret = kubeData('/api/v1/namespaces/' + self.namespace + '/secrets/' + self.pg_secret)
         pg_secret = getSecret.get()['data']
         self.pg_pass = base64.b64decode(pg_secret['password']).decode("utf-8")
@@ -78,7 +141,6 @@ class pgc(object):
         self.pg_db = base64.b64decode(pg_secret['database']).decode("utf-8")
         return True
     def get_master(self):
-        #Get info about Master-node in postgres-cluster
         print (self.pg_hosts)
         for pg_host in self.pg_hosts:
             pg_address_array = pg_host.split(':')
@@ -104,7 +166,6 @@ class pgc(object):
             conn.close()
         return True
     def create_service(self):
-        #Create service-resource for external postgres
         svcNames = []
         svcKube = kubeData('/api/v1/namespaces/' + self.namespace + '/services')
         getSVC = svcKube.get()['items']
@@ -113,33 +174,41 @@ class pgc(object):
 
         if self.name not in svcNames:
             headers = {'Content-Type': 'application/json'}
-            self.serviceTemplate['spec']['ports'].clear()
-            self.serviceTemplate['spec']['ports'].append({ "port": int(self.master_port), "protocol": "TCP", "targetPort": int(self.master_port) })
-            self.endpointTemplate['subsets'].clear()
-            self.endpointTemplate['subsets'].append(self.ip_master)
+            self.svcTemplate['spec']['ports'].clear()
+            self.svcTemplate['spec']['ports'].append({ "port": int(self.master_port), "protocol": "TCP", "targetPort": int(self.master_port) })
+            self.epTemplate['subsets'].clear()
+            self.epTemplate['subsets'].append(self.ip_master)
 
-            svcKube.post(self.serviceTemplate)
+            svcKube.post(self.svcTemplate)
             epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints')
-            epKube.post(self.endpointTemplate)
+            epKube.post(self.epTemplate)
         return True
     def create_endpoint(self):
-        #Edit endpoints for service-resource
-        endpointTemplate['subsets'].clear()
-        endpointTemplate['subsets'].append(self.ip_master)
-        endpointsKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints/' + self.name)
-        endpointsKube.put(self.endpointTemplate)
+        epTemplate['subsets'].clear()
+        epTemplate['subsets'].append(self.ip_master)
+        epKube = kubeData('/api/v1/namespaces/' + self.namespace + '/endpoints/' + self.name)
+        epKube.put(self.epTemplate)
         return True
 
 def main():
-    #Get list of namespaces
     nsKube = kubeData('/api/v1/namespaces/')
-    getNS = nsKube.get()
-    for ns in getNS['items']:
+    getNs = nsKube.get()
+    for ns in getNs['items']:
         namespace = ns['metadata']['name']
-        #Get CRD
+
+        rdcKube = kubeData('/apis/stable.badsysadm.com/v1/namespaces/' + namespace + '/redisclusters')
         pgcKube = kubeData('/apis/stable.badsysadm.com/v1/namespaces/' + namespace + '/pgclusters')
-        getCRD = pgcKube.get()
-        for res in getCRD['items']:
+        rdc_getRes = rdcKube.get()
+        pgc_getRes = pgcKube.get()
+
+        for res in rdc_getRes['items']:
+            rdc_res = rdc(res, namespace)
+            rdc_res.get_secret()
+            rdc_res.get_master()
+            rdc_res.create_service()
+            rdc_res.create_endpoint()
+
+        for res in pgc_getRes['items']:
             pgc_res = pgc(res, namespace)
             pgc_res.get_secret()
             pgc_res.get_master()
@@ -150,4 +219,3 @@ if __name__ == "__main__":
     while True:
         main()
         time.sleep(5)
-
